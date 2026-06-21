@@ -1,20 +1,23 @@
-# Use the latest Playwright image that includes all browsers
-FROM mcr.microsoft.com/playwright:v1.52.0
+# Use official Playwright image with all browsers
+FROM mcr.microsoft.com/playwright:v1.52.0-jammy
 
 # Set working directory
 WORKDIR /app
 
-# Copy package.json and package-lock.json
+# Copy package files first (for better caching)
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm install --production=false
 
-# Copy source files
+# Copy the rest of the application
 COPY . .
 
-# Expose port (match your app port)
-EXPOSE 3000
+# Create screenshots directory
+RUN mkdir -p /app/screenshots
 
-# Start app
+# Expose port
+EXPOSE 4000
+
+# Start the application
 CMD ["npm", "start"]
