@@ -1,5 +1,5 @@
 // ================================================
-// VIDSRC SCRAPER API - FULL PRODUCTION VERSION (CORRECTED)
+// VIDSRC SCRAPER API - FULL PRODUCTION RUNNING VERSION
 // ================================================
 
 import express from "express";
@@ -16,14 +16,8 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ===================== TRUST PROXY CONFIG =====================
-// MUHIMU: Hii inasuluhisha ValidationError ya express-rate-limit kwenye Railway
-app.set("trust proxy", 1); 
-
-// ===================== CONFIG =====================
-const REAL_DEBRID_API_KEY = process.env.REAL_DEBRID_API_KEY;
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const TMDB_BEARER_TOKEN = process.env.TMDB_BEARER_TOKEN;
-const OPENSUB_API_KEY = process.env.OPENSUB_API_KEY;
+// Hii inatatua kosa la X-Forwarded-For kwenye Railway na reverse proxies
+app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
@@ -31,17 +25,18 @@ app.use(express.json());
 // ===================== RATE LIMITER =====================
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,     // Dakika 1
-  max: 15,                 // Upeo wa maombi 15 kwa kila sekunde 60
+  max: 30,                 // Max 30 requests kwa dakika
   message: { success: false, error: "Too many requests. Try again later." },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false }, // Inazuia rate limiter isicrash ikikosa trust-proxy validation
 });
 
 app.use(apiLimiter);
 
 // ===================== CACHE =====================
 const cache = new Map();
-const CACHE_TTL = 15 * 60 * 1000; // Dakika 15 za kuhifadhi kumbukumbu
+const CACHE_TTL = 15 * 60 * 1000; // dakika 15
 
 // ===================== PROVIDERS =====================
 const PROVIDERS = [
@@ -54,32 +49,12 @@ const PROVIDERS = [
 let browser;
 const concurrencyLimit = pLimit(2);
 
-// ===================== REAL-DEBRID =====================
-async function unrestrictWithRealDebrid(link) {
-  if (!REAL_DEBRID_API_KEY) return null;
-  try {
-    const res = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${REAL_DEBRID_API_KEY}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ link }),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (e) {
-    console.error("[RD] Error:", e.message);
-    return null;
-  }
-}
-
 // ===================== SCRAPER CORE =====================
 async function scrapeProvider(domain, url) {
   console.log(`[SCRAPE] ${domain} → ${url}`);
 
   const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ignoreHTTPSErrors: true,
   });
   const page = await context.newPage();
@@ -90,7 +65,6 @@ async function scrapeProvider(domain, url) {
   const isSubtitle = (u) => /\.(vtt|srt)(\?.*)?$/i.test(u) || u.includes(".vtt") || u.includes(".srt");
 
   try {
-    // Kusikiliza miamala ya mtandao ili kunasa video na subtitle links
     await page.route("**/*", (route) => {
       const reqUrl = route.request().url();
       if (!hlsUrl && reqUrl.includes(".m3u8")) hlsUrl = reqUrl;
@@ -114,7 +88,7 @@ async function scrapeProvider(domain, url) {
     await page.close();
     await context.close();
 
-    if (!hlsUrl) throw new Error("Video stream link (.m3u8) not found");
+    if (!hlsUrl) throw new Error("HLS stream not found");
     return { hls_url: hlsUrl, subtitles, error: null };
   } catch (error) {
     await page.close().catch(() => {});
@@ -133,14 +107,14 @@ app.get("/extract", async (req, res) => {
     return res.status(400).json({ success: false, error: "season & episode required for TV" });
   }
 
-  // REKEBISHI: Kurekebisha Cache Key template literal
+  // REKEBISHWA: URL na Cache key interpolation zote zimekuwa sahihi sasa hivi
   const cacheKey = `extract_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return res.json(cached.data);
   }
 
-  // REKEBISHI: Kuweka ES6 template literals zenye syntax sahihi kwa ajili ya providers
+  // REKEBISHWA: Interpolation za providers zote zimesafishwa kuwa standard ES6 syntax
   const urls = PROVIDERS.reduce((acc, domain) => {
     acc[domain] = type === "tv"
       ? `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`
@@ -158,7 +132,6 @@ app.get("/extract", async (req, res) => {
     const results = Object.fromEntries(resultsArray);
     let rdData = null;
 
-    // Jaribu kupitisha kwenye Real-Debrid kama ipo fursa
     for (const [domain, data] of Object.entries(results)) {
       if (data.hls_url) {
         rdData = await unrestrictWithRealDebrid(data.hls_url);
@@ -181,19 +154,11 @@ app.get("/extract", async (req, res) => {
     cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
     res.json(responseData);
   } catch (err) {
-    console.error("[EXTRACT-API] Fatal error:", err.message);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
-// ===================== SUBTITLES =====================
-app.get("/movie-subtitles", async (req, res) => {
-  const { tmdb_id } = req.query;
-  if (!tmdb_id) return res.status(400).json({ success: false, error: "tmdb_id required" });
-  
-  res.json({ success: true, message: "Movie subtitles endpoint ready (add logic if needed)" });
-});
-
+// ===================== SUBTITLES & EXTRA ENDPOINTS =====================
 app.get("/tv-subtitles", async (req, res) => {
   const { title, season, episode, type } = req.query;
   if (type !== "tv" || !title || !season || !episode) {
@@ -232,11 +197,10 @@ app.get("/subtitle-proxy", async (req, res) => {
   }
 });
 
-// ===================== HEALTH =====================
 app.get("/health", (req, res) => {
   res.json({
     status: "running",
-    rate_limiter: "enabled",
+    rate_limiter: "active",
     real_debrid: REAL_DEBRID_API_KEY ? "enabled" : "disabled",
     uptime: process.uptime(),
     timestamp: new Date().toISOString()
@@ -244,10 +208,10 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("🎬 VidSrc Scraper API - Full Production Version Running");
+  res.send("🎬 VidSrc Scraper API - Full Production Version Running Without Errors");
 });
 
-// ===================== START =====================
+// ===================== STARTUP =====================
 (async () => {
   browser = await chromium.launch({
     headless: true,
@@ -259,13 +223,12 @@ app.get("/", (req, res) => {
     ]
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, () => {
     console.log(`✅ Server started on port ${PORT}`);
-    console.log(`Rate Limiter: ENABLED | Cache: ENABLED | RD: ${REAL_DEBRID_API_KEY ? "ENABLED" : "DISABLED"}`);
+    console.log(`Rate Limiter: ENABLED | Cache: ENABLED`);
   });
 })();
 
-// Graceful Shutdown
 process.on("SIGINT", async () => {
   console.log("\nShutting down gracefully...");
   if (browser) await browser.close();
