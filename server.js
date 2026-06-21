@@ -40,10 +40,13 @@ const CACHE_TTL = 15 * 60 * 1000; // dakika 15
 
 // ===================== PROVIDERS =====================
 const PROVIDERS = [
-  "https://vidsrc.xyz",
-  "https://vidsrc.in",
-  "https://vidsrc.pm",
-  "https://vidsrc.net",
+  "https://vidsrcme.ru",
+  "https://vidsrcme.su",
+  "https://vidsrc-me.ru",
+  "https://vidsrc-me.su",
+  "https://vidsrc-embed.ru",
+  "https://vidsrc-embed.su",
+  "https://vsrc.su",
 ];
 
 let browser;
