@@ -1,6 +1,3 @@
-// ================================================
-// TV SUBTITLES MODULE - Modern Version
-// ================================================
 
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
@@ -8,7 +5,6 @@ import AdmZip from "adm-zip";
 import srt2vtt from "srt-to-vtt";
 import { Readable } from "stream";
 
-// Utility: Controlled delay
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const randomDelay = (min = 2500, max = 5500) => {
@@ -17,13 +13,13 @@ const randomDelay = (min = 2500, max = 5500) => {
   return delay(time);
 };
 
-// Build direct ZIP download URL
+// Build ZIP URL
 const buildZipUrl = (title) => {
-  const cleanTitle = title.replace(/[()]/g, "").trim();
-  const match = cleanTitle.match(/^(.+?)\s+(\d+x\d+)\s+(.+)$/);
+  const clean = title.replace(/[()]/g, "").trim();
+  const match = clean.match(/^(.+?)\s+(\d+x\d+)\s+(.+)$/);
 
   if (!match) {
-    const fallback = cleanTitle.replace(/\s+/g, "_") + ".en.zip";
+    const fallback = clean.replace(/\s+/g, "_") + ".en.zip";
     return `https://www.tvsubtitles.net/files/${fallback}`;
   }
 
@@ -32,29 +28,28 @@ const buildZipUrl = (title) => {
   return `https://www.tvsubtitles.net/files/${encodeURIComponent(filename)}`;
 };
 
-// Search for TV Show ID
+// Search TV Show
 async function searchTVShow(title) {
   try {
-    const response = await fetch("https://www.tvsubtitles.net/search.php", {
+    const res = await fetch("https://www.tvsubtitles.net/search.php", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ qs: title }).toString()
     });
 
-    const html = await response.text();
+    const html = await res.text();
     const $ = cheerio.load(html);
 
-    const showLink = $("a[href^='/tvshow-']")
+    const link = $("a[href^='/tvshow-']")
       .filter((_, el) => $(el).text().toLowerCase().includes(title.toLowerCase()))
       .first()
       .attr("href");
 
-    if (!showLink) throw new Error("Show not found");
-
-    const match = showLink.match(/tvshow-(\d+)\.html/);
+    if (!link) return null;
+    const match = link.match(/tvshow-(\d+)\.html/);
     return match ? match[1] : null;
-  } catch (error) {
-    console.error("[SUB] Search failed:", error.message);
+  } catch (e) {
+    console.error("[SUB] Search Error:", e.message);
     return null;
   }
 }
@@ -63,16 +58,15 @@ async function searchTVShow(title) {
 async function getEpisodePageId(showId, season, episode) {
   try {
     const url = `https://www.tvsubtitles.net/tvshow-\( {showId}- \){season}.html`;
-    const response = await fetch(url);
-    const html = await response.text();
+    const res = await fetch(url);
+    const html = await res.text();
     const $ = cheerio.load(html);
 
     let episodeId = null;
 
     $("table.tableauto tr").each((_, row) => {
-      const epCell = $(row).find("td").first().text().trim();
-      const match = epCell.match(/^(\d+)x(\d+)$/);
-
+      const text = $(row).find("td").first().text().trim();
+      const match = text.match(/^(\d+)x(\d+)$/);
       if (match && parseInt(match[1]) === season && parseInt(match[2]) === episode) {
         const link = $(row).find("td").eq(1).find("a").attr("href");
         const idMatch = link?.match(/episode-(\d+)\.html/);
@@ -81,8 +75,8 @@ async function getEpisodePageId(showId, season, episode) {
     });
 
     return episodeId;
-  } catch (error) {
-    console.error("[SUB] Episode ID fetch failed:", error.message);
+  } catch (e) {
+    console.error("[SUB] Episode ID Error:", e.message);
     return null;
   }
 }
@@ -91,8 +85,8 @@ async function getEpisodePageId(showId, season, episode) {
 async function getSubtitleMeta(episodePageId) {
   try {
     const url = `https://www.tvsubtitles.net/episode-${episodePageId}-en.html`;
-    const response = await fetch(url);
-    const html = await response.text();
+    const res = await fetch(url);
+    const html = await res.text();
     const $ = cheerio.load(html);
 
     const link = $("a[href^='/subtitle-']").first();
@@ -102,46 +96,42 @@ async function getSubtitleMeta(episodePageId) {
     const subtitleTitle = link.find("h5").text().trim();
 
     return { subtitleId, subtitleTitle };
-  } catch (error) {
-    console.error("[SUB] Meta fetch failed:", error.message);
+  } catch (e) {
+    console.error("[SUB] Meta Error:", e.message);
     return null;
   }
 }
 
-// Convert SRT ZIP to VTT
-async function convertZipToVTT(zipUrl) {
+// Convert ZIP to VTT
+async function convertToVTT(zipUrl) {
   try {
-    const response = await fetch(zipUrl);
-    if (!response.ok) throw new Error("ZIP download failed");
+    const res = await fetch(zipUrl);
+    if (!res.ok) throw new Error("ZIP download failed");
 
-    const buffer = await response.buffer();
+    const buffer = await res.buffer();
     const zip = new AdmZip(buffer);
-    const srtFile = zip.getEntries().find(entry => entry.entryName.endsWith(".srt"));
+    const srtEntry = zip.getEntries().find(e => e.entryName.endsWith(".srt"));
 
-    if (!srtFile) throw new Error("No SRT file found");
+    if (!srtEntry) throw new Error("No SRT file found");
 
-    const srtBuffer = srtFile.getData();
+    const srtBuffer = srtEntry.getData();
     const srtStream = Readable.from(srtBuffer);
     const vttStream = srtStream.pipe(srt2vtt());
 
-    let vttContent = "";
-    for await (const chunk of vttStream) {
-      vttContent += chunk;
-    }
+    let vtt = "";
+    for await (const chunk of vttStream) vtt += chunk;
 
-    console.log("[SUB] Successfully converted to VTT");
-    return vttContent;
-  } catch (error) {
-    console.error("[SUB] Conversion failed:", error.message);
+    console.log("[SUB] VTT conversion successful");
+    return vtt;
+  } catch (e) {
+    console.error("[SUB] Conversion Error:", e.message);
     return null;
   }
 }
 
-// ================================================
-// MAIN EXPORT
-// ================================================
+// ===================== MAIN FUNCTION =====================
 export async function getTVSubtitleVTT(title, season, episode) {
-  console.log(`[SUB] Processing: \( {title} - S \){season}E${episode}`);
+  console.log(`[SUB] Processing: \( {title} S \){season}E${episode}`);
 
   const showId = await searchTVShow(title);
   if (!showId) return null;
@@ -156,7 +146,7 @@ export async function getTVSubtitleVTT(title, season, episode) {
   await randomDelay();
 
   const zipUrl = buildZipUrl(meta.subtitleTitle);
-  console.log(`[SUB] ZIP URL: ${zipUrl}`);
+  console.log(`[SUB] ZIP: ${zipUrl}`);
 
-  return await convertZipToVTT(zipUrl);
+  return await convertToVTT(zipUrl);
 }
