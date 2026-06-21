@@ -1,5 +1,5 @@
 // ================================================
-// VIDSRC SCRAPER API - FULL PRODUCTION VERSION
+// VIDSRC SCRAPER API - FULL PRODUCTION VERSION (CORRECTED)
 // ================================================
 
 import express from "express";
@@ -16,9 +16,8 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ===================== TRUST PROXY CONFIG =====================
-// Hapa ndipo tunapofuta ile "ValidationError" ya Express-Rate-Limit kwenye Railway!
-// Huu mstari unaiambia Express iamini header za proxy za Railway kupata IP sahihi ya mtumiaji.
-app.set("trust proxy", 1);
+// MUHIMU: Hii inasuluhisha ValidationError ya express-rate-limit kwenye Railway
+app.set("trust proxy", 1); 
 
 // ===================== CONFIG =====================
 const REAL_DEBRID_API_KEY = process.env.REAL_DEBRID_API_KEY;
@@ -32,7 +31,7 @@ app.use(express.json());
 // ===================== RATE LIMITER =====================
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,     // Dakika 1
-  max: 15,                 // Upeo wa requests 15 kwa kila dakika 1
+  max: 15,                 // Upeo wa maombi 15 kwa kila sekunde 60
   message: { success: false, error: "Too many requests. Try again later." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -42,7 +41,7 @@ app.use(apiLimiter);
 
 // ===================== CACHE =====================
 const cache = new Map();
-const CACHE_TTL = 15 * 60 * 1000; // Dakika 15 za kuhifadhi data ili isi-scrape upya kila sekunde
+const CACHE_TTL = 15 * 60 * 1000; // Dakika 15 za kuhifadhi kumbukumbu
 
 // ===================== PROVIDERS =====================
 const PROVIDERS = [
@@ -91,6 +90,7 @@ async function scrapeProvider(domain, url) {
   const isSubtitle = (u) => /\.(vtt|srt)(\?.*)?$/i.test(u) || u.includes(".vtt") || u.includes(".srt");
 
   try {
+    // Kusikiliza miamala ya mtandao ili kunasa video na subtitle links
     await page.route("**/*", (route) => {
       const reqUrl = route.request().url();
       if (!hlsUrl && reqUrl.includes(".m3u8")) hlsUrl = reqUrl;
@@ -103,15 +103,18 @@ async function scrapeProvider(domain, url) {
     const frame = await page.waitForSelector("#the_frame", { timeout: 15000 }).catch(() => null);
     if (frame) {
       const box = await frame.boundingBox();
-      if (box) await page.mouse.click(box.x + box.width/2, box.y + box.height/2);
-      else await page.evaluate(() => document.querySelector("#the_frame")?.click());
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      } else {
+        await page.evaluate(() => document.querySelector("#the_frame")?.click());
+      }
       await page.waitForTimeout(8000);
     }
 
     await page.close();
     await context.close();
 
-    if (!hlsUrl) throw new Error("HLS sio kupatikana");
+    if (!hlsUrl) throw new Error("Video stream link (.m3u8) not found");
     return { hls_url: hlsUrl, subtitles, error: null };
   } catch (error) {
     await page.close().catch(() => {});
@@ -130,14 +133,14 @@ app.get("/extract", async (req, res) => {
     return res.status(400).json({ success: false, error: "season & episode required for TV" });
   }
 
-  // Rekebisho la Template Literal: Kuondoa mabano yasiyotambuliwa katika uundaji wa Key ya cache
+  // REKEBISHI: Kurekebisha Cache Key template literal
   const cacheKey = `extract_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return res.json(cached.data);
   }
 
-  // Rekebisho la Template Literal: Kuandika urls kwa muundo sahihi wa herufi za JavaScript
+  // REKEBISHI: Kuweka ES6 template literals zenye syntax sahihi kwa ajili ya providers
   const urls = PROVIDERS.reduce((acc, domain) => {
     acc[domain] = type === "tv"
       ? `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`
@@ -155,6 +158,7 @@ app.get("/extract", async (req, res) => {
     const results = Object.fromEntries(resultsArray);
     let rdData = null;
 
+    // Jaribu kupitisha kwenye Real-Debrid kama ipo fursa
     for (const [domain, data] of Object.entries(results)) {
       if (data.hls_url) {
         rdData = await unrestrictWithRealDebrid(data.hls_url);
@@ -177,6 +181,7 @@ app.get("/extract", async (req, res) => {
     cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
     res.json(responseData);
   } catch (err) {
+    console.error("[EXTRACT-API] Fatal error:", err.message);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
@@ -239,7 +244,7 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("🎬 VidSrc Scraper API - Full Production Version Running Sahihi");
+  res.send("🎬 VidSrc Scraper API - Full Production Version Running");
 });
 
 // ===================== START =====================
