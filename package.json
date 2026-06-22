@@ -1,26 +1,24 @@
 {
   "name": "vidsrc-scraper",
   "version": "1.0.0",
-  "description": "VidSrc Scraper with Real-Debrid, Subtitles & Rate Limiting",
+  "description": "VidSrc Scraper API Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
   },
-  "dependencies": {
-    "addic7ed-api": "^2.0.1",
-    "adm-zip": "^0.5.16",
-    "cheerio": "^1.1.0",
-    "cors": "^2.8.5",
-    "dotenv": "^17.0.1",
-    "express": "^5.1.0",
-    "express-rate-limit": "^7.4.1",
-    "node-fetch": "^3.3.2",
-    "p-limit": "^6.2.0",
-    "playwright": "^1.52.0",
-    "srt-to-vtt": "^1.1.3"
-  },
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express-rate-limit": "^7.5.0",
+    "playwright": "^1.52.0",
+    "node-fetch": "^2.7.0",
+    "cheerio": "^1.1.0",
+    "adm-zip": "^0.5.16",
+    "srt-to-vtt": "^1.1.3"
   }
 }
