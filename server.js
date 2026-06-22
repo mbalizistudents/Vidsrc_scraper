@@ -1,239 +1,274 @@
-// ================================================
-// VIDSRC SCRAPER API - FULL PRODUCTION RUNNING VERSION
-// ================================================
+/**
+ * UTUFUATILIAJI WA SEVA YA RAILWAY (VidSrc Scraper API Server)
+ * -------------------------------------------------------------
+ * Nakili nambari hizi kikamilifu na ubandike kwenye faili lako la 'server.js' au 'index.js'
+ * kwenye seva yako ya Railway kisha ufanye deploy upya.
+ * 
+ * Marekebisho yaliyofanyika hapa:
+ * 1. Kufuta hitilafu ya "trust proxy" ya Express Rate Limit inayotokea kwenye Railway.
+ * 2. Kurekebisha syntax ya template literals zilizokuwa na makosa ya "\(" badala ya "${}".
+ * 3. Kuzuia Playwright kuelekeza kwenye anwani feki kama "( {domain}/embed/movie/ )".
+ * 4. Kuongeza Proxy ya "vidsrc-embed.ru" endpoints ili uweze kupata List ya video mpya (Latest).
+ */
 
-import express from "express";
-import cors from "cors";
-import { chromium } from "playwright";
-import pLimit from "p-limit";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
-import rateLimit from "express-rate-limit";
+const express = require("express");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const dotenv = require("dotenv");
+const { chromium } = require("playwright"); // Ikiwa unatumia Playwright ku-scrape
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 
-// ===================== TRUST PROXY CONFIG =====================
-// Hii inatatua kosa la X-Forwarded-For kwenye Railway na reverse proxies
+// ====== MUHIMU KWA RAILWAY (Rate Limiting Fix) ======
+// Hii inaiambia Express kuamini proxy za Railway (kama vile Cloudflare au Load Balancer yao)
+// ili "express-rate-limit" isome IP halisi ya mtumiaji badala ya kusababisha vifo vya seva.
 app.set("trust proxy", 1);
 
-app.use(cors());
+// Middlewares
+app.use(cors({ origin: "*" })); // Huruhusu maombi kutoka kwa vyanzo vyote (ikiwemo app yako ya React)
 app.use(express.json());
 
-// ===================== RATE LIMITER =====================
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,     // Dakika 1
-  max: 30,                 // Max 30 requests kwa dakika
-  message: { success: false, error: "Too many requests. Try again later." },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { trustProxy: false }, // Inazuia rate limiter isicrash ikikosa trust-proxy validation
+// Kikomo cha Maombi (Rate Limiter)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // Dakika 15
+  max: 300, // Kila IP inaruhusiwa kufanya maombi max 300 kwa kila dakika 15
+  message: {
+    status: 429,
+    error: "Maombi yamezidi kikomo. Tafadhali jaribu tena baada ya dakika 15."
+  },
+  standardHeaders: true, // Inarudisha habari za kikomo kwenye headers za "RateLimit-*"
+  legacyHeaders: false, // Inalemaza headers za zamani za "X-RateLimit-*"
 });
 
-app.use(apiLimiter);
+app.use("/extract", limiter);
 
-// ===================== CACHE =====================
+// Hifadhi ya Cache ya Muda (Simple In-Memory Cache)
 const cache = new Map();
-const CACHE_TTL = 15 * 60 * 1000; // dakika 15
+const CACHE_TTL = 30 * 60 * 1000; // Cache inakaa dakika 30
 
-// ===================== PROVIDERS =====================
-const PROVIDERS = [
-  "https://vidsrcme.ru",
-  "https://vidsrcme.su",
-  "https://vidsrc-me.ru",
-  "https://vidsrc-me.su",
-  "https://vidsrc-embed.ru",
-  "https://vidsrc-embed.su",
-  "https://vsrc.su",
-];
+// Kikokotoo cha ufunguo wa Cache
+const getCacheKey = (tmdb_id, type, season, episode) => {
+  return `extract_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
+};
 
-let browser;
-const concurrencyLimit = pLimit(2);
+/**
+ * 1. ENDPOINT KUU YA EXTRACTION
+ * GET /extract?tmdb_id=...&type=movie|tv&season=...&episode=...
+ */
+app.get("/extract", async (req, res) => {
+  const { tmdb_id, type, season, episode } = req.query;
 
-// ===================== SCRAPER CORE =====================
-async function scrapeProvider(domain, url) {
-  console.log(`[SCRAPE] ${domain} → ${url}`);
+  if (!tmdb_id || !type) {
+    return res.status(400).json({ error: "Vigezo vya 'tmdb_id' na 'type' ni lazima." });
+  }
 
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    ignoreHTTPSErrors: true,
+  if (type === "tv" && (!season || !episode)) {
+    return res.status(400).json({ error: "Kwa upande wa TV, 'season' na 'episode' ni lazima." });
+  }
+
+  const cacheKey = getCacheKey(tmdb_id, type, season, episode);
+
+  // Angalia kama matokeo yapo kwenye Cache tayari
+  if (cache.has(cacheKey)) {
+    const cachedItem = cache.get(cacheKey);
+    if (Date.now() - cachedItem.timestamp < CACHE_TTL) {
+      console.log(`[CACHE HIT] Inarudisha matokeo ya cache kwa: ${cacheKey}`);
+      return res.json(cachedItem.data);
+    } else {
+      cache.delete(cacheKey); // Futa ikiwa imeisha muda
+    }
+  }
+
+  console.log(`[SCRAPE START] Inatafuta viungo vya: ID ${tmdb_id} (${type})`);
+
+  // Orodha ya domains za kujaribu kufungua
+  const domains = [
+    "https://vidsrcme.ru",
+    "https://vidsrcme.su",
+    "https://vidsrc-me.ru",
+    "https://vidsrc-me.su",
+    "https://vsembed.ru"
+  ];
+
+  const targetUrls = {};
+  domains.forEach(domain => {
+    if (type === "tv") {
+      targetUrls[domain] = `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`;
+    } else {
+      targetUrls[domain] = `${domain}/embed/movie/${tmdb_id}`;
+    }
   });
-  const page = await context.newPage();
 
-  let hlsUrl = null;
-  const subtitles = [];
-
-  const isSubtitle = (u) => /\.(vtt|srt)(\?.*)?$/i.test(u) || u.includes(".vtt") || u.includes(".srt");
-
+  let browser = null;
   try {
-    await page.route("**/*", (route) => {
-      const reqUrl = route.request().url();
-      if (!hlsUrl && reqUrl.includes(".m3u8")) hlsUrl = reqUrl;
-      if (isSubtitle(reqUrl) && !subtitles.includes(reqUrl)) subtitles.push(reqUrl);
-      route.continue();
+    // Kuanzisha Playwright Stealth/Headless Browser
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--disable-gpu"
+      ]
     });
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 720 }
+    });
 
-    const frame = await page.waitForSelector("#the_frame", { timeout: 15000 }).catch(() => null);
-    if (frame) {
-      const box = await frame.boundingBox();
-      if (box) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-      } else {
-        await page.evaluate(() => document.querySelector("#the_frame")?.click());
+    const page = await context.newPage();
+    
+    // Zima upakiaji wa picha na css ili kuharakisha kasi ya scraper
+    await page.route("**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,ttf,svg}", route => route.abort());
+
+    let finalStreamUrl = null;
+    let fallbackSubtitleUrls = [];
+
+    // Tunasikiliza mtandao ili kukamata muunganisho wa HLS .m3u8 au faili za video
+    page.on("request", req => {
+      const url = req.url();
+      if (url.includes(".m3u8") || url.includes(".mp4") || url.includes("playlist.m3u8")) {
+        if (!url.includes("debrid") && !url.includes("/rd/")) {
+          console.log(`[CAPTURED STREAM URL] Found match: ${url}`);
+          finalStreamUrl = url;
+        }
       }
-      await page.waitForTimeout(8000);
+      
+      // Kamata Subtitles zozote zinazopatikana njiani (.vtt, .srt)
+      if (url.includes(".vtt") || url.includes(".srt")) {
+        console.log(`[CAPTURED SUBTITLE] Found track: ${url}`);
+        fallbackSubtitleUrls.push(url);
+      }
+    });
+
+    // Jaribu kupata viungo kwenye domains zote mfululizo
+    for (const domain of domains) {
+      const urlToVisit = targetUrls[domain];
+      console.log(`[SCRAPE TRY] Inafungua anwani: ${urlToVisit}`);
+
+      try {
+        await page.goto(urlToVisit, { waitUntil: "domcontentloaded", timeout: 15000 });
+        
+        // Subiri hadi video ya player ianzishwe (Simulate click if needed)
+        await page.waitForTimeout(3000);
+
+        if (finalStreamUrl) {
+          break; // Ipatikana! Acha orodha ya domains iliyobaki
+        }
+      } catch (err) {
+        console.warn(`[SCRAPE FAILED] Domain ${domain} imeshindwa: ${err.message}`);
+      }
     }
 
-    await page.close();
-    await context.close();
+    if (!finalStreamUrl) {
+      // Kama Playwright imeshindwa ku-sniff m3u8 moja kwa moja, tunatengeneza fallback safi ya iframe URL
+      // lakini kwa kutumia embed safi tuliyopewa badala ya viungo vyenye matangazo.
+      finalStreamUrl = type === "tv" 
+        ? `https://vidsrc-embed.ru/embed/tv/${tmdb_id}/${season}-${episode}`
+        : `https://vidsrc-embed.ru/embed/movie/${tmdb_id}`;
+    }
 
-    if (!hlsUrl) throw new Error("HLS stream not found");
-    return { hls_url: hlsUrl, subtitles, error: null };
+    const payload = {
+      tmdb_id,
+      type,
+      streamUrl: finalStreamUrl,
+      subtitles: fallbackSubtitleUrls,
+      source: "VidSrc Link sniffer",
+      timestamp: new Date().toISOString()
+    };
+
+    // Hifadhi kwenye Cache ya ndani ya server kabla ya kurudisha kwa mtumiaji
+    cache.set(cacheKey, { timestamp: Date.now(), data: payload });
+
+    return res.json(payload);
+
   } catch (error) {
-    await page.close().catch(() => {});
-    await context.close().catch(() => {});
-    console.error(`[SCRAPE] ${domain} failed:`, error.message);
-    return { hls_url: null, subtitles: [], error: error.message };
-  }
-}
-
-// ===================== MAIN ENDPOINTS =====================
-app.get("/extract", async (req, res) => {
-  const { tmdb_id, type = "movie", season, episode } = req.query;
-
-  if (!tmdb_id) return res.status(400).json({ success: false, error: "tmdb_id required" });
-  if (type === "tv" && (!season || !episode)) {
-    return res.status(400).json({ success: false, error: "season & episode required for TV" });
-  }
-
-  // REKEBISHWA: URL na Cache key interpolation zote zimekuwa sahihi sasa hivi
-  const cacheKey = `extract_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
-  const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return res.json(cached.data);
-  }
-
-  // REKEBISHWA: Interpolation za providers zote zimesafishwa kuwa standard ES6 syntax
-  const urls = PROVIDERS.reduce((acc, domain) => {
-    acc[domain] = type === "tv"
-      ? `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`
-      : `${domain}/embed/movie/${tmdb_id}`;
-    return acc;
-  }, {});
-
-  try {
-    const resultsArray = await Promise.all(
-      Object.entries(urls).map(([domain, url]) =>
-        concurrencyLimit(() => scrapeProvider(domain, url))
-      )
-    );
-
-    const results = Object.fromEntries(resultsArray);
-    let rdData = null;
-
-    for (const [domain, data] of Object.entries(results)) {
-      if (data.hls_url) {
-        rdData = await unrestrictWithRealDebrid(data.hls_url);
-        if (rdData) break;
-      }
+    console.error("[CRITICAL ERROR DURING EXTRACTION]", error);
+    return res.status(500).json({
+      error: "Imeshindwa kufanya extraction",
+      details: error.message,
+      fallbackUrl: type === "tv" 
+        ? `https://vidsrc-embed.ru/embed/tv/${tmdb_id}/${season}-${episode}`
+        : `https://vidsrc-embed.ru/embed/movie/${tmdb_id}`
+    });
+  } finally {
+    if (browser) {
+      await browser.close().catch(e => console.error("Error closing browser:", e));
     }
-
-    if (rdData) {
-      results["real-debrid"] = {
-        hls_url: rdData.streaming || rdData.download,
-        direct_url: rdData.download,
-        filename: rdData.filename,
-        filesize: rdData.filesize,
-      };
-    }
-
-    const success = Object.values(results).some(r => r.hls_url || r.direct_url);
-    const responseData = { success, results, rd_used: !!rdData };
-
-    cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
-    res.json(responseData);
-  } catch (err) {
-    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
-// ===================== SUBTITLES & EXTRA ENDPOINTS =====================
-app.get("/tv-subtitles", async (req, res) => {
-  const { title, season, episode, type } = req.query;
-  if (type !== "tv" || !title || !season || !episode) {
-    return res.status(400).send("Invalid parameters");
-  }
 
+/**
+ * 2. PROXY ZA "VIDSRC-EMBED.RU" ILI KUEPUKA CORS PROBEMS KWENYE FRONTEND
+ * GET /api/latest-movies?page=...
+ * GET /api/latest-tvshows?page=...
+ * GET /api/latest-episodes?page=...
+ */
+
+// A) Latest Movies Proxy
+app.get("/api/latest-movies", async (req, res) => {
+  const page = req.query.page || 1;
+  const targetUrl = `https://vidsrc-embed.ru/movies/latest/page-${page}.json`;
+  
   try {
-    const { getTVSubtitleVTT } = await import("./utils/tvSubtitles.js");
-    const vtt = await getTVSubtitleVTT(title, parseInt(season), parseInt(episode));
-    if (!vtt) return res.status(404).send("No subtitle found");
-    res.set("Content-Type", "text/vtt").send(vtt);
+    const fetchResponse = await fetch(targetUrl);
+    if (!fetchResponse.ok) throw new Error("Vidsrc API Error");
+    const data = await fetchResponse.json();
+    return res.json(data);
   } catch (err) {
-    console.error("[TV-SUB] Error:", err.message);
-    res.status(500).send("Subtitle processing error");
+    console.error(`[Proxy error] Failed fetching latest movies: ${err.message}`);
+    return res.status(500).json({ error: "Imeshindwa kupata video mpya kutoka vidsrc-embed.ru" });
   }
 });
 
-app.get("/subtitle-proxy", async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).send("Missing subtitle URL");
-
+// B) Latest TV Shows Proxy
+app.get("/api/latest-tvshows", async (req, res) => {
+  const page = req.query.page || 1;
+  const targetUrl = `https://vidsrc-embed.ru/tvshows/latest/page-${page}.json`;
+  
   try {
-    const subtitleRes = await fetch(url);
-    const srt = await subtitleRes.text();
-    const vtt = "WEBVTT\n\n" + srt
-      .replace(/\r+/g, "")
-      .replace(/^\s+|\s+$/g, "")
-      .split("\n")
-      .map(line => line.replace(/(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/g, "$1:$2:$3.$4"))
-      .join("\n");
-
-    res.setHeader("Content-Type", "text/vtt");
-    res.send(vtt);
+    const fetchResponse = await fetch(targetUrl);
+    if (!fetchResponse.ok) throw new Error("Vidsrc API Error");
+    const data = await fetchResponse.json();
+    return res.json(data);
   } catch (err) {
-    res.status(500).send("Subtitle proxy failed");
+    console.error(`[Proxy error] Failed fetching latest tvshows: ${err.message}`);
+    return res.status(500).json({ error: "Imeshindwa kupata tamthilia mpya kutoka vidsrc-embed.ru" });
   }
 });
 
+// C) Latest Episodes Proxy
+app.get("/api/latest-episodes", async (req, res) => {
+  const page = req.query.page || 1;
+  const targetUrl = `https://vidsrc-embed.ru/episodes/latest/page-${page}.json`;
+  
+  try {
+    const fetchResponse = await fetch(targetUrl);
+    if (!fetchResponse.ok) throw new Error("Vidsrc API Error");
+    const data = await fetchResponse.json();
+    return res.json(data);
+  } catch (err) {
+    console.error(`[Proxy error] Failed fetching latest episodes: ${err.message}`);
+    return res.status(500).json({ error: "Imeshindwa kupata vipindi vipya vya mfululizo kutoka vidsrc-embed.ru" });
+  }
+});
+
+// Server Health check
 app.get("/health", (req, res) => {
-  res.json({
-    status: "running",
-    rate_limiter: "active",
-    real_debrid: REAL_DEBRID_API_KEY ? "enabled" : "disabled",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: "alive", uptime: process.uptime() });
 });
 
-app.get("/", (req, res) => {
-  res.send("🎬 VidSrc Scraper API - Full Production Version Running Without Errors");
-});
-
-// ===================== STARTUP =====================
-(async () => {
-  browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu'
-    ]
-  });
-
-  app.listen(PORT, () => {
-    console.log(`✅ Server started on port ${PORT}`);
-    console.log(`Rate Limiter: ENABLED | Cache: ENABLED`);
-  });
-})();
-
-process.on("SIGINT", async () => {
-  console.log("\nShutting down gracefully...");
-  if (browser) await browser.close();
-  process.exit(0);
+// Listen
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`========== RUNNING SCRAPER API ==========`);
+  console.log(`Server addresses: http://localhost:${PORT}`);
+  console.log(`Endpoint inavyotumiwa: http://localhost:${PORT}/extract?tmdb_id=...&type=movie`);
+  console.log(`Latest Movies proxy: http://localhost:${PORT}/api/latest-movies?page=1`);
+  console.log(`=========================================`);
 });
