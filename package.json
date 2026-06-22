@@ -2,7 +2,6 @@
   "name": "vidsrc-scraper",
   "version": "1.0.0",
   "description": "VidSrc Scraper with Real-Debrid, Subtitles & Rate Limiting",
-  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
